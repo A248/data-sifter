@@ -1,0 +1,18 @@
+[package]
+name = "data-sifter"
+version = "0.1.0"
+authors = ["A248"]
+edition = "2021"
+rust-version = "1.56"
+license = "Apache-2.0"
+
+[dependencies]
+eyre = "0.6.5"
+stable-eyre = "0.2.2"
+sqlx = { version = "0.5.9", features = ["runtime-async-std-rustls", "postgres", "decimal"]}
+async-std = "1.10.0"
+csv = "1.1.6"
+futures-util = "0.3.17"
+futures-lite = "1.12.0"
+itertools = "0.10.1"
+rust_decimal = "1.17.0"
