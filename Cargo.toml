@@ -5,6 +5,7 @@ authors = ["A248"]
 edition = "2021"
 rust-version = "1.56"
 license = "Apache-2.0"
+description = "A completely over-engineered small project to solve a very specific academic problem."
 
 [dependencies]
 eyre = "0.6.5"
