@@ -1,0 +1,25 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ '*' ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install latest stable Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+    - name: Cache Rust build
+      uses: Swatinem/rust-cache@v1
+    - name: Test with Cargo
+      run: cargo test
+    - name: Build with Cargo
+      run: cargo build --release
+    - uses: actions/upload-artifact@v2
+      with:
+        name: data-sifter
+        path: target/release/data-sifter
