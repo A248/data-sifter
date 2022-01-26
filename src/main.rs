@@ -1,5 +1,6 @@
 /*
- * Copyright © 2021 Anand Beh
+ * data-sifter
+ * Copyright © 2022 Anand Beh
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +15,26 @@
  * limitations under the License.
  */
 
+mod database;
+
 use eyre::Result;
-use std::path::{PathBuf, Path};
+use std::path::PathBuf;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
+use async_std::task::{self, JoinHandle};
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use itertools::Itertools;
-use futures_util::stream::BoxStream;
-use sqlx::{Column, Error, Row, ValueRef, postgres::{PgRow, PgValue, Postgres}, Value};
-use csv::StringRecord;
-use std::iter::FromIterator;
-use std::borrow::Cow;
+use sqlx::PgPool;
+use crate::database::QueryOutput;
 
 fn main() -> core::result::Result<(), eyre::Error> {
+    use std::env;
+
+    if let Err(env::VarError::NotPresent) = env::var("RUST_BACKTRACE") {
+        env::set_var("RUST_BACKTRACE", "1");
+        println!("Enabled RUST_BACKTRACE");
+    }
     stable_eyre::install()?;
 
     let stdin = io::stdin();
@@ -41,7 +49,7 @@ fn main() -> core::result::Result<(), eyre::Error> {
         connection_pool: sqlx::postgres::PgPool::connect_lazy(&connection_url)?
     };
 
-    async_std::task::block_on(app.run())
+    task::block_on(app.run())
 }
 
 struct IO<R> where R: io::BufRead {
@@ -75,33 +83,84 @@ struct App<R> where R: io::BufRead {
 impl<R> App<R> where R: io::BufRead {
 
     async fn run(&mut self) -> Result<()> {
-
         let csv_input = self.io.prompt("Enter CSV dataset file")?;
         let csv_input = PathBuf::from(csv_input).canonicalize()?;
-        self.read_csv(&csv_input).await?;
 
-        let csv_output = {
-            let mut csv_output = csv_input.into_os_string();
-            csv_output.push(".data-sifter-output.csv");
-            PathBuf::from(csv_output)
+        // Spawn a separate task so that the CSV is written in the background
+        let csv_to_database: JoinHandle<Result<()>>= {
+            let pool = self.connection_pool.clone();
+            let csv_input = csv_input.clone();
+            task::spawn(async move {
+                read_csv_then_write_to_database(pool, csv_input).await
+            })
         };
-        if csv_output.exists() {
-            eyre::bail!("Delete existing file first")
+
+        let query;
+        let mut connection;
+        let _results;
+        let query = {
+            query = self.io.prompt("Enter SQL query")?;
+
+            // Wait for the data to be ready before executing a query
+            csv_to_database.await?;
+
+            connection = self.connection_pool.acquire().await?;
+            _results = sqlx::query(&query).fetch(&mut connection);
+            QueryOutput {
+                results: _results
+            }
+        };
+
+        let next = self.io.prompt("
+        What would you like to do with this query?
+        'csv' - Query the dataset and output the results to CSV.
+        'show' - Query the dataset and show the results here.
+        ")?;
+        match next.as_str() {
+            "csv" => {
+                let csv_file = {
+                    let mut csv_file = csv_input.into_os_string();
+                    csv_file.push(".data-sifter-output.csv");
+                    PathBuf::from(csv_file)
+                };
+                if csv_file.exists() {
+                    eyre::bail!("Delete existing file first")
+                }
+                let any_results = {
+                    let csv_file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&csv_file)?;
+                    query.output_query_results(csv_file).await?
+                };
+                if any_results {
+                    let csv_file = csv_file.canonicalize()?.into_os_string();
+                    let stdout = &mut self.io.output;
+                    stdout.write_all(b"Wrote output CSV to ")?;
+                    stdout.write_all(csv_file.as_bytes())?;
+                } else {
+                    self.io.write_output("No results")?;
+                }
+                Ok(())
+            },
+            "show" => {
+                let any_results = query.output_query_results(&mut self.io.output).await?;
+                if !any_results {
+                    self.io.write_output("No results")?;
+                }
+                Ok(())
+            }
+            unknown_option => eyre::bail!("Invalid option: {}", unknown_option)
         }
-
-        let query = self.io.prompt("Enter SQL query")?;
-
-        let mut connection = self.connection_pool.acquire().await?;
-        let query = sqlx::query(&query).fetch(&mut connection);
-
-        let any_results = self.write_csv(query, &csv_output).await?;
-        self.io.write_output(
-            if any_results { "Wrote output CSV" } else { "Empty result set"})?;
-
-        Ok(())
     }
+}
 
-    async fn read_csv(&mut self, csv_input: &Path) -> Result<()> {
+async fn read_csv_then_write_to_database(pool: PgPool, csv_input: PathBuf) -> Result<()> {
+    use crate::database::Schema;
+
+    // Wrap most of the function body in a blocking task
+    let futures = task::spawn_blocking(move || {
+
         assert!(csv_input.exists(), "Specified CSV file {:?} does not exist", csv_input);
 
         let csv_input = io::BufReader::new(File::open(csv_input)?);
@@ -111,183 +170,43 @@ impl<R> App<R> where R: io::BufRead {
             let first_record = csv_input.headers()?;
             let schema = Schema::from(first_record);
 
-            let mut connection = self.connection_pool.acquire().await?;
-            schema.create_table(&mut connection).await?;
-
+            task::block_on(async {
+                let mut connection = pool.acquire().await?;
+                schema.create_or_recreate_table(&mut connection).await?;
+                Ok::<_, eyre::Report>(())
+            })?;
             schema
         };
+        let column_names = schema.column_names_joined_by_commas();
 
         let futures = FuturesUnordered::new();
         for record in csv_input.records() {
             let record = record?;
             assert_eq!(schema.len(), record.len(), "Field list must match");
 
-            let connection = self.connection_pool.acquire();
+            let connection = pool.acquire();
+            let column_names = column_names.clone();
             let query = connection.map(|connection| {
                 async move {
                     let mut connection = connection?;
                     // INSERT INTO data (col1, col2) VALUES ('val1', 'val2')
                     let query = format!(
                         "INSERT INTO data ({}) VALUES ({})",
-                        schema.column_names_joined_by_commas(),
+                        column_names,
                         record.iter().map(|value| format!("'{}'", value)).join(", "));
-                    let query_result = sqlx::query(&query).execute(&mut connection).await?;
-                    Ok::<_, eyre::Report>(query_result)
+                    sqlx::query(&query).execute(&mut connection).await?;
+                    Ok::<_, eyre::Report>(())
                 }
             });
             futures.push(query.flatten());
         }
-        for result in futures.collect::<Vec<_>>().await {
-            result?;
-        }
-        Ok(())
+        Ok::<_, eyre::Report>(futures)
+    }).await?;
+
+    for result in futures.collect::<Vec<_>>().await {
+        result?;
     }
-
-    async fn write_csv(&self,
-                       mut query: BoxStream<'_, Result<PgRow, Error>>,
-                       csv_output: &Path) -> Result<bool> {
-
-        let csv_output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(csv_output);
-        let mut csv_output = csv::Writer::from_writer(csv_output?);
-
-        let first_row = match query.next().await {
-            Some(row) => row?,
-            None => return Ok(false)
-        };
-
-        // Write header first
-        csv_output.write_record(
-            first_row
-                .columns()
-                .iter()
-                .map(|column| String::from(column.name()))
-                .collect::<Vec<_>>()
-        )?;
-
-        // Write first row
-        self.write_row_to_csv(&first_row, &mut csv_output)?;
-
-        // Write remaining rows
-        let results = query.map(|row| {
-            let row = row?;
-            self.write_row_to_csv(&row, &mut csv_output)
-        });
-        for result in results.collect::<Vec<_>>().await {
-            result?;
-        }
-        Ok(true)
-    }
-
-    fn write_row_to_csv<'i, W>(&self,
-                               row: &PgRow,
-                               csv_writer: &mut csv::Writer<W>) -> Result<()>
-        where W: io::Write {
-
-        let mut raw_row_data = Vec::new();
-        for index in 0..row.len() {
-
-            let column_data = row.try_get_raw(index)?;
-            let column_data: PgValue = ValueRef::to_owned(&column_data);
-            raw_row_data.push(column_data);
-        }
-
-        // Use 2 loops so that PgValue's remain in scope
-        let mut decoded_data = Vec::new();
-        for column_data in raw_row_data.iter() {
-            decoded_data.push(DecodedValue::from(column_data));
-        }
-        csv_writer.write_record(decoded_data)?;
-        Ok(())
-    }
-}
-
-struct DecodedValue<'v> {
-    data: Cow<'v, str>
-}
-
-impl<'v> From<&'v PgValue> for DecodedValue<'v> {
-    fn from(value: &'v PgValue) -> Self {
-        let data = {
-            if let Ok(decoded) = value.try_decode::<&str>() {
-                Cow::Borrowed(decoded)
-            } else if let Ok(decoded) = value.try_decode::<i32>() {
-                Cow::Owned(decoded.to_string())
-            } else if let Ok(decoded) = value.try_decode::<i64>() {
-                Cow::Owned(decoded.to_string())
-            } else if let Ok(decoded) = value.try_decode::<f32>() {
-                Cow::Owned(decoded.to_string())
-            } else if let Ok(decoded) = value.try_decode::<f64>() {
-                Cow::Owned(decoded.to_string())
-            } else if let Ok(decoded) = value.try_decode::<rust_decimal::Decimal>() {
-                Cow::Owned(decoded.to_string())
-            } else {
-                panic!("No determinable value for type info {:?}", value.type_info())
-            }
-        };
-        Self { data }
-    }
-}
-
-impl<'v> AsRef<[u8]> for DecodedValue<'v> {
-    fn as_ref(&self) -> &[u8] {
-        match &self.data {
-            Cow::Borrowed(borrowed) => borrowed.as_bytes(),
-            Cow::Owned(owned) => owned.as_bytes()
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Schema {
-    columns: Vec<Box<str>>
-}
-
-impl<'s> From<&'s StringRecord> for Schema {
-    fn from(record: &'s StringRecord) -> Self {
-        record.iter().collect()
-    }
-}
-
-impl<'s> FromIterator<&'s str> for Schema {
-    fn from_iter<T: IntoIterator<Item=&'s str>>(iter: T) -> Self {
-        Self {
-            columns: iter.into_iter().map(Box::from).collect()
-        }
-    }
-}
-
-impl Schema {
-
-    fn len(&self) -> usize {
-        self.columns.len()
-    }
-
-    async fn create_table(&self, connection: &mut sqlx::pool::PoolConnection<Postgres>) -> Result<()> {
-        sqlx::query("DROP TABLE IF EXISTS data").execute(&mut *connection).await?;
-
-        let mut create_table_query = String::from("CREATE TABLE data (");
-        for (index, column_name) in self.columns.iter().enumerate() {
-            if index != 0 { create_table_query.push_str(", "); }
-            create_table_query.push_str(column_name);
-            create_table_query.push_str(" VARCHAR(256) NOT NULL");
-        }
-        create_table_query.push_str(")");
-
-        sqlx::query(&create_table_query).execute(&mut *connection).await?;
-        Ok(())
-    }
-
-    fn column_names_joined_by_commas(&self) -> String {
-        let mut output = String::new();
-        for (index, column_name) in self.columns.iter().enumerate() {
-            if index != 0 { output.push_str(", "); }
-            output.push_str(column_name);
-        }
-        output
-    }
+    Ok(())
 }
 
 

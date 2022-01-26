@@ -1,37 +1,28 @@
 
 # Data-Sifter
 
-Rust program to re-organize data in CSV files using SQL.
+A CLI tool written in Rust to query data in CSV files using SQL.
 
-### Problem
+### Use-cases
 
-School assignments sometimes require using Excel or Google Sheets to create graphs of data. However, sometimes the data is not organized in a certain fashion, making it non-trivial to turn into the desired kind of graph.
-
-Many people solve this problem by manipulating the data using Excel / Google Sheets functions. However, this requires learning
+* Maybe you just want a generic way to view a CSV file on the command line.
+* Perhaps an academic assignment requires using Excel or Google Sheets to create graphs of data. Why learn Excel or Sheets functions when you already know SQL?
 
 ### Solution
 
-Data-Sifter allows you to re-organize the data from Excel and Google Sheets. This way, you don't have to learn the niche Excel and Google Sheets functions.
+Data-Sifter takes a CSV file as data. It copies the data to a RDMS (currently PostgreSQL).
 
-Data-Sifter uses familiar SQL syntax, specifically from the PostgreSQL dialect. So, you can apply existing SQL knowledge without having to learn functions from Excel or Google Sheets.
+Then, it allows you to run a query against the data.
 
-## Usage
-
-Export the data as CSV, run Data-Sifter, then re-import the CSV back to Excel / Google Sheets.
+You have the option of displaying the query results either on the command line or written to another CSV file.
 
 ### Steps
 
 1. Obtain a PostgreSQL connection URL. For this, you can create a free account with [CockroachDb](https://cockroachlabs.cloud/). The connection URL will look like `postgres://user:password@host:port/database`.
 2. Enter the path to your CSV file.
-3. Write a SQL query. It is the results of this query which will be re-exported to CSV.
-4. The output CSV file is located in the same directory as the source CSV file.
+3. Write a SQL query.
+4. Decide whether you want the query results sent to STDOUT or written to another CSV file.
 
-### How it Works
-
-1. The data in your CSV file is piped to the SQL database.
-2. You write a SELECT query to select that data in the form you desire.
-3. The result set from the query is written to the output CSV file.
-
-## License
+### License
 
 Licensed under the Apache License 2.0. See the license file for more details.
