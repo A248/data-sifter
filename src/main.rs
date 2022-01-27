@@ -75,8 +75,8 @@ pub struct IO<R> where R: io::BufRead + Unpin {
 impl<R> IO<R> where R: io::BufRead + Unpin {
 
     async fn write_output(&mut self, line: &str) -> Result<()> {
-        self.output.write(line.as_bytes()).await?;
-        self.output.write(b"\n").await?;
+        self.output.write_all(line.as_bytes()).await?;
+        self.output.write_all(b"\n").await?;
         Ok(self.output.flush().await?)
     }
 
