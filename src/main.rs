@@ -26,9 +26,9 @@ use async_std::task::{self, JoinHandle};
 use futures_lite::{AsyncBufReadExt, AsyncWriteExt};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use itertools::Itertools;
-use sqlx::PgPool;
+use sqlx::postgres::PgPool;
 use crate::config::Config;
-use crate::database::QueryOutput;
+use crate::database::Query;
 
 fn main() -> core::result::Result<(), eyre::Error> {
     use std::env;
@@ -46,7 +46,7 @@ fn main() -> core::result::Result<(), eyre::Error> {
     task::block_on(async_main(io))
 }
 
-async fn async_main<R>(mut io: IO<R>) -> Result<()> where R: io::BufRead + Unpin {
+async fn async_main<R>(mut io: IO<R>) -> Result<()> where R: io::BufRead + Unpin + Send {
     let config_path = Config::default_path(&mut io).await?;
     let config = Config::load(&config_path).await?;
     let config = match config {
@@ -67,7 +67,7 @@ async fn async_main<R>(mut io: IO<R>) -> Result<()> where R: io::BufRead + Unpin
     app.run().await
 }
 
-pub struct IO<R> where R: io::BufRead + Unpin {
+pub struct IO<R> {
     input: R,
     output: io::Stdout
 }
@@ -90,37 +90,40 @@ impl<R> IO<R> where R: io::BufRead + Unpin {
     }
 }
 
-struct App<R> where R: io::BufRead + Unpin {
+struct App<R> {
     io: IO<R>,
-    connection_pool: sqlx::postgres::PgPool
+    connection_pool: PgPool
 }
 
-impl<R> App<R> where R: io::BufRead + Unpin {
+impl<R> App<R> where R: io::BufRead + Unpin + Send {
 
     async fn run(&mut self) -> Result<()> {
-        let csv_input = self.io.prompt("Enter CSV dataset file").await?;
-        let csv_input = PathBuf::from(csv_input).canonicalize().await?;
 
-        // Spawn a separate task so that the CSV is written in the background
+        // Spawn a separate task so that the CSV is copied to the database in the background
         let csv_to_database: JoinHandle<Result<()>>= {
-            let pool = self.connection_pool.clone();
-            let csv_input = csv_input.clone();
-            task::spawn(read_csv_then_write_to_database(pool, csv_input))
+            let csv_input = self.io.prompt(
+                "Enter CSV dataset file. Use the value KEEP to keep your existing data."
+            ).await?;
+            if csv_input == "KEEP" {
+                task::spawn(async { Ok(()) })
+            } else {
+                let csv_input = PathBuf::from(csv_input).canonicalize().await?;
+                let pool = self.connection_pool.clone();
+                task::spawn(read_csv_then_write_to_database(pool, csv_input))
+            }
         };
 
-        let query;
-        let mut connection;
-        let _results;
+        let query = self.io.prompt("Enter SQL query. Your data is in the \"data\" table").await?;
         let query = {
-            query = self.io.prompt("Enter SQL query").await?;
+            let pool = self.connection_pool.clone();
+            async move {
+                // Wait for the data to be ready before executing a query
+                csv_to_database.await?;
 
-            // Wait for the data to be ready before executing a query
-            csv_to_database.await?;
-
-            connection = self.connection_pool.acquire().await?;
-            _results = sqlx::query(&query).fetch(&mut connection);
-            QueryOutput {
-                results: _results
+                Ok::<_, eyre::Report>(Query {
+                    query,
+                    connection: pool.acquire().await?
+                })
             }
         };
 
@@ -131,20 +134,20 @@ impl<R> App<R> where R: io::BufRead + Unpin {
         ").await?;
         match next.as_str() {
             "csv" => {
-                let csv_file = {
-                    let mut csv_file = csv_input.into_os_string();
-                    csv_file.push(".data-sifter-output.csv");
-                    PathBuf::from(csv_file)
-                };
+                let csv_file = self.io.prompt("Enter output CSV file").await?;
+                let csv_file = PathBuf::from(csv_file);
                 if csv_file.exists().await {
                     eyre::bail!("Delete existing file first")
                 }
                 let any_results = {
-                    let csv_file = OpenOptions::new()
+                    let file_writer = OpenOptions::new()
                         .write(true)
                         .create_new(true)
                         .open(&csv_file).await?;
-                    query.output_query_results(csv_file).await?
+                    query.await?
+                        .execute()
+                        .output_query_results(file_writer)
+                        .await?
                 };
                 if any_results {
                     let csv_file = csv_file.canonicalize().await?.into_os_string();
@@ -158,7 +161,11 @@ impl<R> App<R> where R: io::BufRead + Unpin {
                 Ok(())
             },
             "show" => {
-                let any_results = query.output_query_results(&mut self.io.output).await?;
+                let any_results = query.await?
+                    .execute()
+                    .output_query_results(&mut self.io.output)
+                    .await?;
+
                 if !any_results {
                     self.io.write_output("No results").await?;
                 }

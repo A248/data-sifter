@@ -21,6 +21,7 @@ use sqlx::{Column, Postgres, Row, Value, ValueRef};
 use sqlx::postgres::{PgRow, PgValue};
 use eyre::Result;
 use futures_util::{StreamExt, stream::BoxStream};
+use sqlx::pool::PoolConnection;
 
 pub(crate) type ResultSet<'r> = BoxStream<'r, Result<PgRow, sqlx::Error>>;
 
@@ -110,7 +111,22 @@ impl Schema {
     }
 }
 
-pub(crate) struct QueryOutput<'r> {
+#[derive(Debug)]
+pub struct Query {
+    pub connection: PoolConnection<Postgres>,
+    pub query: String
+}
+
+impl Query {
+    pub fn execute(&mut self) -> QueryOutput {
+        let results = sqlx::query(&self.query).fetch(&mut self.connection);
+        QueryOutput {
+            results
+        }
+    }
+}
+
+pub struct QueryOutput<'r> {
     pub results: ResultSet<'r>
 }
 
@@ -143,6 +159,7 @@ impl QueryOutput<'_> {
             let row = row?;
             output_query_result_row(&row, &mut csv_output).await?;
         }
+        csv_output.flush().await?;
         Ok(true)
     }
 }
