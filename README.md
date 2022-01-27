@@ -23,6 +23,12 @@ You have the option of displaying the query results either on the command line o
 3. Write a SQL query.
 4. Decide whether you want the query results sent to STDOUT or written to another CSV file.
 
+### Download
+
+Downloads are available through Github Actions; there are no fixed releases.
+
+Go to [the Actions page](https://github.com/A248/data-sifter/actions), click on the latest successful build, and a download link will be available at the bottom of the page under "Artifacts."
+
 ### License
 
 Licensed under the Apache License 2.0. See the license file for more details.
