@@ -55,7 +55,7 @@ impl Config {
         Ok(())
     }
 
-    pub async fn default_path<R>(io: &mut IO<R>) -> Result<PathBuf> where R: std::io::BufRead {
+    pub async fn default_path<R>(io: &mut IO<R>) -> Result<PathBuf> where R: async_std::io::BufRead + Unpin {
         Ok(if let Some(config_dir) = dirs::config_dir() {
             let mut config_dir = PathBuf::from(config_dir.into_os_string());
             config_dir.push("data-sifter");
@@ -67,7 +67,7 @@ impl Config {
         } else {
             io.write_output(
                 "Warning: Home config directory not found (e.g. ~/.config on GNU/Linux). \
-                data-sifter will use the current directory instead")?;
+                data-sifter will use the current directory instead").await?;
             PathBuf::from("data-sifter.ron")
         })
     }

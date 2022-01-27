@@ -16,12 +16,11 @@
  */
 
 use std::borrow::Cow;
-use csv::StringRecord;
+use csv_async::StringRecord;
 use sqlx::{Column, Postgres, Row, Value, ValueRef};
 use sqlx::postgres::{PgRow, PgValue};
 use eyre::Result;
-use futures_util::stream::BoxStream;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream::BoxStream};
 
 pub(crate) type ResultSet<'r> = BoxStream<'r, Result<PgRow, sqlx::Error>>;
 
@@ -116,9 +115,11 @@ pub(crate) struct QueryOutput<'r> {
 }
 
 impl QueryOutput<'_> {
-    pub(crate) async fn output_query_results<W>(mut self,
-                                                csv_output: W) -> Result<bool> where W: std::io::Write {
-        let mut csv_output = csv::Writer::from_writer(csv_output);
+    pub async fn output_query_results<W>(mut self,
+                                         csv_output: W) -> Result<bool>
+        where W: async_std::io::Write + Unpin {
+
+        let mut csv_output = csv_async::AsyncWriter::from_writer(csv_output);
 
         let first_row = match self.results.next().await {
             Some(row) => row?,
@@ -132,26 +133,23 @@ impl QueryOutput<'_> {
                 .iter()
                 .map(|column| String::from(column.name()))
                 .collect::<Vec<_>>()
-        )?;
+        ).await?;
 
         // Write first row
-        output_query_result_row(&first_row, &mut csv_output)?;
+        output_query_result_row(&first_row, &mut csv_output).await?;
 
         // Write remaining rows
-        let results = self.results.map(|row| {
+        while let Some(row) = self.results.next().await {
             let row = row?;
-            output_query_result_row(&row, &mut csv_output)
-        });
-        for result in results.collect::<Vec<_>>().await {
-            result?;
+            output_query_result_row(&row, &mut csv_output).await?;
         }
         Ok(true)
     }
 }
 
-fn output_query_result_row<W>(row: &PgRow,
-                              csv_writer: &mut csv::Writer<W>) -> Result<()>
-    where W: std::io::Write {
+async fn output_query_result_row<W>(row: &PgRow,
+                                    csv_writer: &mut csv_async::AsyncWriter<W>) -> Result<()>
+    where W: async_std::io::Write + Unpin {
 
     let mut raw_row_data = Vec::new();
     for index in 0..row.len() {
@@ -166,6 +164,6 @@ fn output_query_result_row<W>(row: &PgRow,
     for column_data in raw_row_data.iter() {
         decoded_data.push(DecodedValue::from(column_data));
     }
-    csv_writer.write_record(decoded_data)?;
+    csv_writer.write_record(decoded_data).await?;
     Ok(())
 }
