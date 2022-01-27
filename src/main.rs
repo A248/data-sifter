@@ -16,6 +16,7 @@
  */
 
 mod database;
+mod config;
 
 use eyre::Result;
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use async_std::task::{self, JoinHandle};
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use itertools::Itertools;
 use sqlx::PgPool;
+use crate::config::Config;
 use crate::database::QueryOutput;
 
 fn main() -> core::result::Result<(), eyre::Error> {
@@ -39,20 +41,35 @@ fn main() -> core::result::Result<(), eyre::Error> {
 
     let stdin = io::stdin();
 
-    let mut io = IO {
+    let io = IO {
         input: stdin.lock(),
         output: io::stdout()
     };
-    let connection_url = io.prompt("Enter PostgreSQL connection URL")?;
-    let mut app = App {
-        io,
-        connection_pool: sqlx::postgres::PgPool::connect_lazy(&connection_url)?
-    };
-
-    task::block_on(app.run())
+    task::block_on(async_main(io))
 }
 
-struct IO<R> where R: io::BufRead {
+async fn async_main<R>(mut io: IO<R>) -> Result<()> where R: io::BufRead {
+    let config_path = Config::default_path(&mut io).await?;
+    let config = Config::load(&config_path).await?;
+    let config = match config {
+        None => {
+            Config::write_default_config(&config_path).await?;
+            io.write_output(
+                "The default config has been created. Please configure and then restart data-sifter"
+            )?;
+            return Ok(());
+        },
+        Some(config) => config
+    };
+    let Config { postgres_url } = config;
+    let mut app = App {
+        io,
+        connection_pool: sqlx::postgres::PgPool::connect_lazy(&postgres_url)?
+    };
+    app.run().await
+}
+
+pub struct IO<R> where R: io::BufRead {
     input: R,
     output: io::Stdout
 }
