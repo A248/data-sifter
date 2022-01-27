@@ -53,7 +53,7 @@ async fn async_main<R>(mut io: IO<R>) -> Result<()> where R: io::BufRead {
     let config = Config::load(&config_path).await?;
     let config = match config {
         None => {
-            Config::write_default_config(&config_path).await?;
+            Config::default().write_to(&config_path).await?;
             io.write_output(
                 "The default config has been created. Please configure and then restart data-sifter"
             )?;

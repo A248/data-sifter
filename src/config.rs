@@ -41,9 +41,7 @@ impl Config {
         })
     }
 
-    pub async fn write_default_config(path: &Path) -> Result<()> {
-        let config = Self::default();
-
+    pub async fn write_to(self, path: &Path) -> Result<()> {
         // Write default config
         let file = OpenOptions::new()
             .create_new(true)
@@ -51,7 +49,7 @@ impl Config {
             .open(path).await?;
         let mut writer = BufWriter::new(file);
         writer.write_all(
-            ron::ser::to_string_pretty(&config, PrettyConfig::default())?.as_bytes()
+            ron::ser::to_string_pretty(&self, PrettyConfig::default())?.as_bytes()
         ).await?;
         writer.flush().await?;
         Ok(())
@@ -91,7 +89,7 @@ mod tests {
         let tempdir = tempfile::tempdir()?;
         let path = temp_file_in(&tempdir, "config.ron");
 
-        Config::write_default_config(&path).await?;
+        Config::default().write_to(&path).await?;
         Ok(())
     }
 
@@ -100,9 +98,10 @@ mod tests {
         let tempdir = tempfile::tempdir()?;
         let path = temp_file_in(&tempdir, "config.ron");
 
-        Config::write_default_config(&path).await?;
+        let config = Config { postgres_url: String::from("my-url") };
+        config.clone().write_to(&path).await?;
         let reloaded = Config::load(&path).await?.expect("Config ought to exist");
-        assert_eq!(Config::default(), reloaded);
+        assert_eq!(config, reloaded);
         Ok(())
     }
 }
